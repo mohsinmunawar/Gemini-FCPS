@@ -1,0 +1,101 @@
+{
+  "entities": {
+    "user": {
+      "title": "User",
+      "description": "User profile and settings",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "targetExam": { "type": "string", "enum": ["FCPS 1", "IMM", "FCPS 2"] },
+        "subscriptionStatus": { "type": "string", "enum": ["free", "paid"] }
+      },
+      "required": ["uid", "email"]
+    },
+    "question": {
+      "title": "Question",
+      "description": "MCQ Question data",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "correctAnswerIndex": { "type": "integer" },
+        "explanation": { "type": "string" },
+        "book": { "type": "string" },
+        "chapter": { "type": "string" },
+        "topic": { "type": "string" },
+        "type": { "type": "string", "enum": ["text", "image", "formula"] },
+        "imageUrl": { "type": "string" }
+      },
+      "required": ["text", "options", "correctAnswerIndex"]
+    },
+    "book": {
+      "title": "Book",
+      "description": "Book metadata",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "examType": { "type": "string" }
+      },
+      "required": ["title", "examType"]
+    },
+    "chapter": {
+      "title": "Chapter",
+      "description": "Chapter metadata",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "bookId": { "type": "string" }
+      },
+      "required": ["title", "bookId"]
+    },
+    "topic": {
+      "title": "Topic",
+      "description": "Topic metadata and notes",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "chapterId": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "required": ["title", "chapterId"]
+    },
+    "userProgress": {
+      "title": "User Progress",
+      "description": "Tracking user answers",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "questionId": { "type": "string" },
+        "status": { "type": "string", "enum": ["correct", "wrong"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "questionId", "status"]
+    },
+    "mockExam": {
+      "title": "Mock Exam",
+      "description": "Mock exam results",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "score": { "type": "number" },
+        "totalQuestions": { "type": "integer" },
+        "duration": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "questionIds": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["userId", "score", "totalQuestions"]
+    }
+  },
+  "firestore": {
+    "users": { "schema": "user", "description": "User profiles" },
+    "questions": { "schema": "question", "description": "Question bank" },
+    "books": { "schema": "book", "description": "Books list" },
+    "chapters": { "schema": "chapter", "description": "Chapters list" },
+    "topics": { "schema": "topic", "description": "Topics list" },
+    "userProgress": { "schema": "userProgress", "description": "User progress tracking" },
+    "mockExams": { "schema": "mockExam", "description": "Mock exam history" }
+  }
+}

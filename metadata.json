@@ -1,0 +1,5 @@
+{
+  "name": "MedPrep MCQ",
+  "description": "A comprehensive MCQ-based preparation app for student doctors preparing for FCPS 1, IMM, and FCPS 2 exams, featuring study modes, mock exams, and AI-driven explanations.",
+  "requestFramePermissions": []
+}
