@@ -10,6 +10,8 @@ import { ChevronLeft, ChevronRight, Clock, AlertCircle, CheckCircle2, X } from '
 import QuestionCard from '../components/QuestionCard';
 import { cn } from '../lib/utils';
 
+import { localDb } from '../lib/localDb';
+
 export default function MockExamSession() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -31,23 +33,55 @@ export default function MockExamSession() {
 
     const fetchQuestions = async () => {
       try {
-        // Fetch questions from selected subjects
-        // Firestore 'in' limit is 10, so we split subjects into batches of 10
-        const subjectBatches = [];
-        for (let i = 0; i < config.subjects.length; i += 10) {
-          subjectBatches.push(config.subjects.slice(i, i + 10));
-        }
+        // Separate subjects into cloud and local
+        const cloudSubjects = config.subjects.filter(id => isNaN(Number(id)));
+        const localSubjects = config.subjects.filter(id => !isNaN(Number(id))).map(Number);
 
         let allQuestions: Question[] = [];
-        for (const batch of subjectBatches) {
-          const q = query(
-            collection(db, 'questions'),
-            where('topicId', 'in', batch),
-            limit(config.numQuestions * 2)
-          );
-          const snap = await getDocs(q);
-          const batchQuestions = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Question));
-          allQuestions = [...allQuestions, ...batchQuestions];
+
+        // Fetch from Cloud
+        if (cloudSubjects.length > 0) {
+          const subjectBatches = [];
+          for (let i = 0; i < cloudSubjects.length; i += 10) {
+            subjectBatches.push(cloudSubjects.slice(i, i + 10));
+          }
+
+          for (const batch of subjectBatches) {
+            const q = query(
+              collection(db, 'questions'),
+              where('topicId', 'in', batch),
+              limit(config.numQuestions * 2)
+            );
+            const snap = await getDocs(q);
+            const batchQuestions = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Question));
+            allQuestions = [...allQuestions, ...batchQuestions];
+          }
+        }
+
+        // Fetch from Local
+        if (localSubjects.length > 0) {
+          const localData = await localDb.questions
+            .where('topicId')
+            .anyOf(localSubjects)
+            .limit(config.numQuestions * 2)
+            .toArray();
+          
+          const localQuestions = localData.map(lq => ({
+            id: lq.id!.toString(),
+            text: lq.text,
+            options: lq.options,
+            correctAnswerIndex: lq.correctAnswerIndex,
+            explanation: lq.explanation,
+            bookId: lq.bookId.toString(),
+            chapterId: lq.chapterId.toString(),
+            topicId: lq.topicId.toString(),
+            book: lq.book,
+            topic: lq.topic,
+            type: lq.type,
+            isLocal: true
+          } as any));
+          
+          allQuestions = [...allQuestions, ...localQuestions];
         }
         
         // Randomize and slice to requested number

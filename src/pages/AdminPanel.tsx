@@ -1,22 +1,25 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, addDoc, getDocs, query, where, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, where, deleteDoc, doc, serverTimestamp, updateDoc, increment } from 'firebase/firestore';
 import { db, auth } from '../firebase';
 import { sampleBooks, sampleQuestions } from '../data/seedData';
 import { motion, AnimatePresence } from 'motion/react';
-import { Database, Trash2, Plus, AlertTriangle, CheckCircle2, Upload, FileText, Loader2, Book as BookIcon, ChevronLeft, List, ChevronRight, X } from 'lucide-react';
+import { Database, Trash2, Plus, AlertTriangle, CheckCircle2, Upload, FileText, Loader2, Book as BookIcon, ChevronLeft, List, ChevronRight, X, RefreshCw, Cloud, BookOpen } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useDropzone } from 'react-dropzone';
 import * as pdfjsLib from 'pdfjs-dist';
 import { extractMCQsFromText, ExtractedMCQ } from '../services/geminiService';
 import { handleFirestoreError } from '../lib/firestoreUtils';
 import { OperationType } from '../types';
+import { useAuth } from '../context/AuthContext';
+import { localDb } from '../lib/localDb';
 
 // Set up PDF.js worker using a direct unpkg URL for version 5+ compatibility
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 export default function AdminPanel() {
   const navigate = useNavigate();
+  const { profile } = useAuth();
   const [loading, setLoading] = useState(false);
   const [scraping, setScraping] = useState(false);
   const [message, setMessage] = useState('');
@@ -24,16 +27,26 @@ export default function AdminPanel() {
   const [extractedCount, setExtractedCount] = useState(0);
   const [progress, setProgress] = useState('');
   const [books, setBooks] = useState<any[]>([]);
+  const [localBooks, setLocalBooks] = useState<any[]>([]);
   const [counts, setCounts] = useState({ chapters: 0, topics: 0, questions: 0 });
-  const [targetExam, setTargetExam] = useState('USMLE Step 1');
-
+  const [targetExam, setTargetExam] = useState(profile?.targetExam || 'USMLE Step 1');
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  useEffect(() => {
+    if (profile?.targetExam) {
+      setTargetExam(profile.targetExam);
+    }
+  }, [profile]);
 
   const fetchBooks = useCallback(async () => {
     try {
       const snap = await getDocs(collection(db, 'books'));
       setBooks(snap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) })));
       
+      // Fetch local books
+      const allLocalBooks = await localDb.books.toArray();
+      setLocalBooks(allLocalBooks);
+
       // Fetch counts
       const [chaptersSnap, topicsSnap, questionsSnap] = await Promise.all([
         getDocs(collection(db, 'chapters')),
@@ -68,6 +81,7 @@ export default function AdminPanel() {
         if (snap.empty) {
           const bookRef = await addDoc(collection(db, 'books'), {
             ...book,
+            questionCount: sampleQuestions.filter(q => q.book === book.title).length,
             createdAt: serverTimestamp()
           });
           bookId = bookRef.id;
@@ -83,7 +97,8 @@ export default function AdminPanel() {
         if (chapterSnap.empty) {
           const chapterRef = await addDoc(collection(db, 'chapters'), {
             title: 'General Principles',
-            bookId: bookId
+            bookId: bookId,
+            questionCount: sampleQuestions.filter(q => q.book === book.title).length
           });
           chapterId = chapterRef.id;
         } else {
@@ -98,7 +113,8 @@ export default function AdminPanel() {
           const topicRef = await addDoc(collection(db, 'topics'), {
             title: 'Foundations',
             chapterId: chapterId,
-            notes: 'Basic foundational principles.'
+            notes: 'Basic foundational principles.',
+            questionCount: sampleQuestions.filter(q => q.book === book.title).length
           });
           topicId = topicRef.id;
         } else {
@@ -139,10 +155,80 @@ export default function AdminPanel() {
     }
   };
 
+  const recalculateCounts = async () => {
+    setLoading(true);
+    setError('');
+    setMessage('');
+    try {
+      // 1. Recalculate Cloud Counts
+      const booksSnap = await getDocs(collection(db, 'books'));
+      const chaptersSnap = await getDocs(collection(db, 'chapters'));
+      const topicsSnap = await getDocs(collection(db, 'topics'));
+      const questionsSnap = await getDocs(collection(db, 'questions'));
+
+      const questions = questionsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      // Update Cloud Books
+      for (const bookDoc of booksSnap.docs) {
+        const count = questions.filter(q => (q as any).bookId === bookDoc.id).length;
+        await updateDoc(bookDoc.ref, { questionCount: count });
+      }
+
+      // Update Cloud Chapters
+      for (const chapterDoc of chaptersSnap.docs) {
+        const count = questions.filter(q => (q as any).chapterId === chapterDoc.id).length;
+        await updateDoc(chapterDoc.ref, { questionCount: count });
+      }
+
+      // Update Cloud Topics
+      for (const topicDoc of topicsSnap.docs) {
+        const count = questions.filter(q => (q as any).topicId === topicDoc.id).length;
+        await updateDoc(topicDoc.ref, { questionCount: count });
+      }
+
+      // 2. Recalculate Local Counts
+      const localBooks = await localDb.books.toArray();
+      const localChapters = await localDb.chapters.toArray();
+      const localTopics = await localDb.topics.toArray();
+      const localQuestions = await localDb.questions.toArray();
+
+      for (const lb of localBooks) {
+        const count = localQuestions.filter(q => q.bookId === lb.id).length;
+        await localDb.books.update(lb.id!, { questionCount: count });
+      }
+
+      for (const lc of localChapters) {
+        const count = localQuestions.filter(q => q.chapterId === lc.id).length;
+        await localDb.chapters.update(lc.id!, { questionCount: count });
+      }
+
+      for (const lt of localTopics) {
+        const countByTopic = localQuestions.filter(q => q.topicId === lt.id).length;
+        await localDb.topics.update(lt.id!, { questionCount: countByTopic });
+      }
+
+      setMessage('All question counts (Cloud & Local) recalculated successfully!');
+      fetchBooks();
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.WRITE, 'recalculate-counts');
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const clearDatabase = async () => {
     setLoading(true);
     setShowClearConfirm(false);
     try {
+      // Clear local DB
+      await Promise.all([
+        localDb.books.clear(),
+        localDb.chapters.clear(),
+        localDb.topics.clear(),
+        localDb.questions.clear()
+      ]);
+
       const collections = ['books', 'chapters', 'topics', 'questions', 'mockExams', 'userProgress'];
       for (const coll of collections) {
         const snap = await getDocs(collection(db, coll));
@@ -179,145 +265,253 @@ export default function AdminPanel() {
         try {
           const typedArray = new Uint8Array(reader.result as ArrayBuffer);
           const pdf = await pdfjsLib.getDocument(typedArray).promise;
-          let fullText = '';
-
-          // Extract text from all pages
-          for (let i = 1; i <= pdf.numPages; i++) {
-            setProgress(`Reading PDF: Page ${i} of ${pdf.numPages}...`);
-            const page = await pdf.getPage(i);
-            const textContent = await page.getTextContent();
-            
-            // Sort items by vertical position (top to bottom) then horizontal (left to right)
-            const items = textContent.items as any[];
-            items.sort((a, b) => {
-              if (Math.abs(a.transform[5] - b.transform[5]) > 5) {
-                return b.transform[5] - a.transform[5]; // Higher Y first
-              }
-              return a.transform[4] - b.transform[4]; // Lower X first
-            });
-
-            let lastY = -1;
-            let pageText = '';
-            for (const item of items) {
-              if (lastY !== -1 && Math.abs(lastY - item.transform[5]) > 5) {
-                pageText += '\n';
-              }
-              pageText += item.str + ' ';
-              lastY = item.transform[5];
-            }
-            fullText += pageText + '\n--- PAGE BREAK ---\n';
-          }
-
-          // Chunk the text to process with Gemini
-          // Larger chunks (10000 chars) with significant overlap (1500 chars)
-          // This ensures questions aren't cut off and AI has enough context.
-          const chunkSize = 10000; 
-          const overlap = 1500;
-          const chunks = [];
-          
-          for (let i = 0; i < fullText.length; i += (chunkSize - overlap)) {
-            chunks.push(fullText.slice(i, i + chunkSize));
-            if (i + chunkSize >= fullText.length) break;
-          }
-
+          const totalPages = pdf.numPages;
           let totalCount = 0;
-          const concurrencyLimit = 3; // Slightly lower concurrency for larger chunks to avoid rate limits
+
+          // Process PDF in batches of pages to save memory and provide better progress
+          const pageBatchSize = 10;
           
-          for (let i = 0; i < chunks.length; i += concurrencyLimit) {
-            const currentBatch = chunks.slice(i, i + concurrencyLimit);
-            const batchNum = Math.floor(i / concurrencyLimit) + 1;
-            const totalBatches = Math.ceil(chunks.length / concurrencyLimit);
+          for (let startPage = 1; startPage <= totalPages; startPage += pageBatchSize) {
+            const endPage = Math.min(startPage + pageBatchSize - 1, totalPages);
+            setProgress(`Processing Pages ${startPage}-${endPage} of ${totalPages}...`);
             
-            setProgress(`AI Scraping: Batch ${batchNum} of ${totalBatches} (${totalCount} MCQs found so far)...`);
-            
-            const results = await Promise.allSettled(currentBatch.map(chunk => extractMCQsFromText(chunk)));
-            
-            for (const result of results) {
-              if (result.status === 'fulfilled' && result.value && result.value.length > 0) {
-                const mcqs = result.value;
-                // Save extracted MCQs to Firestore
-                for (const mcq of mcqs) {
-                  const bookTitle = mcq.book || 'Medical Book';
-                  const topicTitle = mcq.topic || 'General';
-                  
-                  // 1. Ensure Book exists
-                  let bookId = '';
-                  const bookQuery = query(collection(db, 'books'), where('title', '==', bookTitle));
-                  const bookSnap = await getDocs(bookQuery);
-                  if (bookSnap.empty) {
-                    const bookRef = await addDoc(collection(db, 'books'), {
-                      title: bookTitle,
-                      description: `Extracted content from ${bookTitle}`,
-                      examType: targetExam,
-                      image: 'https://images.unsplash.com/photo-1544640808-32ca72ac7f37?w=800&auto=format&fit=crop&q=60'
-                    });
-                    bookId = bookRef.id;
-                  } else {
-                    bookId = bookSnap.docs[0].id;
-                  }
-
-                  // 2. Ensure Chapter exists
-                  let chapterId = '';
-                  const chapterQuery = query(collection(db, 'chapters'), 
-                    where('bookId', '==', bookId), 
-                    where('title', '==', 'Extracted Content')
-                  );
-                  const chapterSnap = await getDocs(chapterQuery);
-                  if (chapterSnap.empty) {
-                    const chapterRef = await addDoc(collection(db, 'chapters'), {
-                      title: 'Extracted Content',
-                      bookId: bookId
-                    });
-                    chapterId = chapterRef.id;
-                  } else {
-                    chapterId = chapterSnap.docs[0].id;
-                  }
-
-                  // 3. Ensure Topic exists
-                  let topicId = '';
-                  const topicQuery = query(collection(db, 'topics'), 
-                    where('chapterId', '==', chapterId), 
-                    where('title', '==', topicTitle)
-                  );
-                  const topicSnap = await getDocs(topicQuery);
-                  if (topicSnap.empty) {
-                    const topicRef = await addDoc(collection(db, 'topics'), {
-                      title: topicTitle,
-                      chapterId: chapterId,
-                      notes: `Questions related to ${topicTitle}`
-                    });
-                    topicId = topicRef.id;
-                  } else {
-                    topicId = topicSnap.docs[0].id;
-                  }
-
-                  // 4. Save Question
-                  const correctIndex = mcq.options.findIndex(opt => 
-                    opt.toLowerCase().trim() === mcq.correctAnswer.toLowerCase().trim() ||
-                    mcq.correctAnswer.toLowerCase().includes(opt.toLowerCase().trim())
-                  );
-
-                  await addDoc(collection(db, 'questions'), {
-                    text: mcq.text,
-                    options: mcq.options,
-                    correctAnswerIndex: correctIndex >= 0 ? correctIndex : 0,
-                    explanation: mcq.explanation,
-                    bookId: bookId,
-                    chapterId: chapterId,
-                    topicId: topicId,
-                    book: bookTitle,
-                    topic: topicTitle,
-                    type: 'text',
-                    createdAt: serverTimestamp()
-                  });
-                  totalCount++;
-                  setExtractedCount(totalCount);
+            let batchText = '';
+            for (let i = startPage; i <= endPage; i++) {
+              const page = await pdf.getPage(i);
+              const textContent = await page.getTextContent();
+              
+              const items = textContent.items as any[];
+              items.sort((a, b) => {
+                if (Math.abs(a.transform[5] - b.transform[5]) > 5) {
+                  return b.transform[5] - a.transform[5];
                 }
-              } else if (result.status === 'fulfilled' && result.value && result.value.length === 0) {
-                console.warn('AI returned no MCQs for this chunk.');
-              } else if (result.status === 'rejected') {
-                console.error('Batch chunk failed:', result.reason);
+                return a.transform[4] - b.transform[4];
+              });
+
+              let lastY = -1;
+              let pageText = '';
+              for (const item of items) {
+                if (lastY !== -1 && Math.abs(lastY - item.transform[5]) > 5) {
+                  pageText += '\n';
+                }
+                pageText += item.str + ' ';
+                lastY = item.transform[5];
               }
+              batchText += pageText + '\n--- PAGE BREAK ---\n';
+            }
+
+            // Chunk the batch text
+            const chunkSize = 12000; // Slightly larger chunks for better context
+            const overlap = 2000;
+            const chunks = [];
+            
+            for (let j = 0; j < batchText.length; j += (chunkSize - overlap)) {
+              chunks.push(batchText.slice(j, j + chunkSize));
+              if (j + chunkSize >= batchText.length) break;
+            }
+
+            // Process chunks in this page batch
+            const concurrencyLimit = 2; // Lower concurrency to be safer with rate limits
+            for (let j = 0; j < chunks.length; j += concurrencyLimit) {
+              const currentBatch = chunks.slice(j, j + concurrencyLimit);
+              const chunkProgress = Math.round(((j + currentBatch.length) / chunks.length) * 100);
+              
+              setProgress(`AI Scraping: Pages ${startPage}-${endPage} (${chunkProgress}% of batch, ${totalCount} MCQs found)...`);
+              
+              // Retry logic for AI calls
+              const processWithRetry = async (chunk: string, retries = 2): Promise<ExtractedMCQ[]> => {
+                try {
+                  return await extractMCQsFromText(chunk);
+                } catch (err) {
+                  if (retries > 0) {
+                    console.warn(`AI call failed, retrying... (${retries} left)`);
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    return processWithRetry(chunk, retries - 1);
+                  }
+                  throw err;
+                }
+              };
+
+              const results = await Promise.allSettled(currentBatch.map(chunk => processWithRetry(chunk)));
+              
+              for (const result of results) {
+                if (result.status === 'fulfilled' && result.value && result.value.length > 0) {
+                  const mcqs = result.value;
+                  for (const mcq of mcqs) {
+                    const bookTitle = (mcq.book || 'Medical Book').trim();
+                    const topicTitle = (mcq.topic || 'General').trim();
+                    
+                    // --- SAVE TO LOCAL DB (IndexedDB) ---
+                    let localBookId: number;
+                    const existingLocalBook = await localDb.books.where('title').equals(bookTitle).first();
+                    if (!existingLocalBook) {
+                      localBookId = await localDb.books.add({
+                        title: bookTitle,
+                        description: `Extracted content from ${bookTitle}`,
+                        examType: targetExam,
+                        image: 'https://images.unsplash.com/photo-1544640808-32ca72ac7f37?w=800&auto=format&fit=crop&q=60',
+                        questionCount: 0,
+                        createdAt: Date.now(),
+                        source: 'local'
+                      });
+                    } else {
+                      localBookId = existingLocalBook.id!;
+                    }
+
+                    let localChapterId: number;
+                    const existingLocalChapter = await localDb.chapters.where({ bookId: localBookId, title: 'Extracted Content' }).first();
+                    if (!existingLocalChapter) {
+                      localChapterId = await localDb.chapters.add({
+                        title: 'Extracted Content',
+                        bookId: localBookId,
+                        questionCount: 0
+                      });
+                    } else {
+                      localChapterId = existingLocalChapter.id!;
+                    }
+
+                    let localTopicId: number;
+                    const existingLocalTopic = await localDb.topics.where({ chapterId: localChapterId, title: topicTitle }).first();
+                    if (!existingLocalTopic) {
+                      localTopicId = await localDb.topics.add({
+                        title: topicTitle,
+                        chapterId: localChapterId,
+                        notes: `Questions related to ${topicTitle}`,
+                        questionCount: 0
+                      });
+                    } else {
+                      localTopicId = existingLocalTopic.id!;
+                    }
+
+                    // --- SAVE TO CLOUD (Firestore) ---
+                    let bookId = '';
+                    const bookQuery = query(collection(db, 'books'), where('title', '==', bookTitle));
+                    const bookSnap = await getDocs(bookQuery);
+                    if (bookSnap.empty) {
+                      const bookRef = await addDoc(collection(db, 'books'), {
+                        title: bookTitle,
+                        description: `Extracted content from ${bookTitle}`,
+                        examType: targetExam,
+                        image: 'https://images.unsplash.com/photo-1544640808-32ca72ac7f37?w=800&auto=format&fit=crop&q=60',
+                        questionCount: 0,
+                        createdAt: serverTimestamp()
+                      });
+                      bookId = bookRef.id;
+                      await localDb.books.update(localBookId, { cloudId: bookId });
+                    } else {
+                      bookId = bookSnap.docs[0].id;
+                    }
+
+                    let chapterId = '';
+                    const chapterQuery = query(collection(db, 'chapters'), 
+                      where('bookId', '==', bookId), 
+                      where('title', '==', 'Extracted Content')
+                    );
+                    const chapterSnap = await getDocs(chapterQuery);
+                    if (chapterSnap.empty) {
+                      const chapterRef = await addDoc(collection(db, 'chapters'), {
+                        title: 'Extracted Content',
+                        bookId: bookId,
+                        questionCount: 0
+                      });
+                      chapterId = chapterRef.id;
+                      await localDb.chapters.update(localChapterId, { cloudId: chapterId });
+                    } else {
+                      chapterId = chapterSnap.docs[0].id;
+                    }
+
+                    let topicId = '';
+                    const topicQuery = query(collection(db, 'topics'), 
+                      where('chapterId', '==', chapterId), 
+                      where('title', '==', topicTitle)
+                    );
+                    const topicSnap = await getDocs(topicQuery);
+                    if (topicSnap.empty) {
+                      const topicRef = await addDoc(collection(db, 'topics'), {
+                        title: topicTitle,
+                        chapterId: chapterId,
+                        notes: `Questions related to ${topicTitle}`,
+                        questionCount: 0
+                      });
+                      topicId = topicRef.id;
+                      await localDb.topics.update(localTopicId, { cloudId: topicId });
+                    } else {
+                      topicId = topicSnap.docs[0].id;
+                    }
+
+                    // 4. Save Question (with de-duplication check)
+                    const questionText = mcq.text.trim();
+                    
+                    // Local de-duplication
+                    const existingLocalQuestion = await localDb.questions.where({ topicId: localTopicId, text: questionText }).first();
+                    if (!existingLocalQuestion) {
+                      const correctIndex = mcq.options.findIndex(opt => 
+                        opt.toLowerCase().trim() === mcq.correctAnswer.toLowerCase().trim() ||
+                        mcq.correctAnswer.toLowerCase().includes(opt.toLowerCase().trim())
+                      );
+
+                      // Save to Local DB
+                      await localDb.questions.add({
+                        text: questionText,
+                        options: mcq.options,
+                        correctAnswerIndex: correctIndex >= 0 ? correctIndex : 0,
+                        explanation: mcq.explanation,
+                        bookId: localBookId,
+                        chapterId: localChapterId,
+                        topicId: localTopicId,
+                        book: bookTitle,
+                        topic: topicTitle,
+                        type: 'text',
+                        createdAt: Date.now()
+                      });
+
+                      // Update local counts
+                      const currentBook = await localDb.books.get(localBookId);
+                      const currentChapter = await localDb.chapters.get(localChapterId);
+                      const currentTopic = await localDb.topics.get(localTopicId);
+                      await localDb.books.update(localBookId, { questionCount: (currentBook?.questionCount || 0) + 1 });
+                      await localDb.chapters.update(localChapterId, { questionCount: (currentChapter?.questionCount || 0) + 1 });
+                      await localDb.topics.update(localTopicId, { questionCount: (currentTopic?.questionCount || 0) + 1 });
+
+                      // Save to Cloud
+                      const questionQuery = query(collection(db, 'questions'), 
+                        where('topicId', '==', topicId), 
+                        where('text', '==', questionText)
+                      );
+                      const questionSnap = await getDocs(questionQuery);
+                      
+                      if (questionSnap.empty) {
+                        await addDoc(collection(db, 'questions'), {
+                          text: questionText,
+                          options: mcq.options,
+                          correctAnswerIndex: correctIndex >= 0 ? correctIndex : 0,
+                          explanation: mcq.explanation,
+                          bookId: bookId,
+                          chapterId: chapterId,
+                          topicId: topicId,
+                          book: bookTitle,
+                          topic: topicTitle,
+                          type: 'text',
+                          createdAt: serverTimestamp()
+                        });
+
+                        // Increment cloud counts
+                        await Promise.all([
+                          updateDoc(doc(db, 'books', bookId), { questionCount: increment(1) }),
+                          updateDoc(doc(db, 'chapters', chapterId), { questionCount: increment(1) }),
+                          updateDoc(doc(db, 'topics', topicId), { questionCount: increment(1) })
+                        ]);
+                      }
+
+                      totalCount++;
+                      setExtractedCount(totalCount);
+                    }
+                  }
+                }
+              }
+              
+              // Small delay between batches to respect rate limits
+              await new Promise(resolve => setTimeout(resolve, 1000));
             }
           }
 
@@ -391,6 +585,14 @@ export default function AdminPanel() {
             >
               {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
               Seed Sample Data
+            </button>
+            <button
+              onClick={recalculateCounts}
+              disabled={loading || scraping}
+              className="w-full flex items-center justify-center gap-2 bg-slate-100 text-slate-700 py-4 rounded-2xl font-bold hover:bg-slate-200 transition-all disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
+              Recalculate Counts
             </button>
             <button
               onClick={() => setShowClearConfirm(true)}
@@ -538,8 +740,54 @@ export default function AdminPanel() {
       <section className="mt-12 bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <BookIcon className="w-6 h-6 text-primary" />
-            <h3 className="text-xl font-bold">Uploaded Books</h3>
+            <BookOpen className="w-6 h-6 text-purple-600" />
+            <h3 className="text-xl font-bold">Local Library (Offline)</h3>
+          </div>
+          <span className="text-sm font-bold bg-purple-50 text-purple-600 px-3 py-1 rounded-full">
+            {localBooks.length} Books
+          </span>
+        </div>
+
+        <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4 mb-12">
+          {localBooks.map((book) => (
+            <div key={book.id} className="p-4 border border-purple-100 rounded-2xl bg-purple-50/30 hover:border-purple-300 transition-all group">
+              <div className="flex items-start justify-between mb-2">
+                <h4 className="font-bold text-slate-900 group-hover:text-purple-600 transition-colors">{book.title}</h4>
+                <button 
+                  onClick={async () => {
+                    if (window.confirm(`Delete ${book.title} from local storage?`)) {
+                      await localDb.books.delete(book.id);
+                      await localDb.chapters.where('bookId').equals(book.id).delete();
+                      await localDb.topics.where('bookId').equals(book.id).delete(); // Note: topic schema might need adjustment if bookId isn't indexed
+                      await localDb.questions.where('bookId').equals(book.id).delete();
+                      fetchBooks();
+                    }
+                  }}
+                  className="text-slate-300 hover:text-danger transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-xs text-slate-500 line-clamp-2">{book.description}</p>
+              <div className="mt-3 pt-3 border-t border-purple-100 flex items-center justify-between">
+                <span className="text-[10px] font-bold text-purple-400 uppercase tracking-wider">{book.examType}</span>
+                <span className="text-[10px] font-bold bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full uppercase tracking-wider">
+                  {book.questionCount || 0} MCQs
+                </span>
+              </div>
+            </div>
+          ))}
+          {localBooks.length === 0 && (
+            <div className="col-span-full py-12 text-center border-2 border-dashed border-purple-100 rounded-3xl">
+              <p className="text-purple-400 italic">No local books found. Scraped MCQs will appear here.</p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <Cloud className="w-6 h-6 text-primary" />
+            <h3 className="text-xl font-bold">Cloud Library (Synced)</h3>
           </div>
           <span className="text-sm font-bold bg-slate-100 text-slate-500 px-3 py-1 rounded-full">
             {books.length} Books
@@ -553,7 +801,7 @@ export default function AdminPanel() {
                 <h4 className="font-bold text-slate-900 group-hover:text-primary transition-colors">{book.title}</h4>
                 <button 
                   onClick={async () => {
-                    if (window.confirm(`Delete ${book.title} and its content?`)) {
+                    if (window.confirm(`Delete ${book.title} and its content from cloud?`)) {
                       setLoading(true);
                       try {
                         // Delete book
@@ -591,6 +839,9 @@ export default function AdminPanel() {
               <p className="text-xs text-slate-500 line-clamp-2">{book.description}</p>
               <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{book.examType}</span>
+                <span className="text-[10px] font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-full uppercase tracking-wider">
+                  {book.questionCount || 0} MCQs
+                </span>
               </div>
             </div>
           ))}

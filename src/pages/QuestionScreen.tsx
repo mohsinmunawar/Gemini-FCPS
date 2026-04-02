@@ -13,6 +13,8 @@ interface QuestionScreenProps {
   mode: 'study' | 'quick';
 }
 
+import { localDb } from '../lib/localDb';
+
 export default function QuestionScreen({ mode }: QuestionScreenProps) {
   const { bookId, chapterId, topicId } = useParams();
   const { profile } = useAuth();
@@ -28,28 +30,63 @@ export default function QuestionScreen({ mode }: QuestionScreenProps) {
   useEffect(() => {
     const fetchQuestions = async () => {
       try {
-        let q;
-        if (mode === 'study') {
-          q = query(
-            collection(db, 'questions'), 
-            where('topicId', '==', topicId)
-          );
-        } else {
-          q = query(
-            collection(db, 'questions'),
-            limit(25)
-          );
-        }
+        let data: Question[] = [];
         
-        const snap = await getDocs(q);
-        let data = snap.docs.map(doc => {
-          const docData = doc.data() as any;
-          return { id: doc.id, ...docData } as Question;
-        });
+        // Check if it's a local topic (numeric ID)
+        const isLocal = topicId && !isNaN(Number(topicId));
+        
+        if (mode === 'study') {
+          if (isLocal) {
+            const localQuestions = await localDb.questions.where('topicId').equals(Number(topicId)).toArray();
+            data = localQuestions.map(lq => ({
+              id: lq.id!.toString(),
+              text: lq.text,
+              options: lq.options,
+              correctAnswerIndex: lq.correctAnswerIndex,
+              explanation: lq.explanation,
+              bookId: lq.bookId.toString(),
+              chapterId: lq.chapterId.toString(),
+              topicId: lq.topicId.toString(),
+              book: lq.book,
+              topic: lq.topic,
+              type: lq.type,
+              isLocal: true
+            } as any));
+          } else {
+            const q = query(
+              collection(db, 'questions'), 
+              where('topicId', '==', topicId)
+            );
+            const snap = await getDocs(q);
+            data = snap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Question));
+          }
+        } else {
+          // Quick Review: Combine cloud and local
+          let cloudData: Question[] = [];
+          try {
+            const q = query(collection(db, 'questions'), limit(25));
+            const snap = await getDocs(q);
+            cloudData = snap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Question));
+          } catch (e) {}
 
-        // Randomize for Quick Review
-        if (mode === 'quick') {
-          data = data.sort(() => Math.random() - 0.5);
+          const localData = await localDb.questions.limit(25).toArray();
+          const localQuestions = localData.map(lq => ({
+            id: lq.id!.toString(),
+            text: lq.text,
+            options: lq.options,
+            correctAnswerIndex: lq.correctAnswerIndex,
+            explanation: lq.explanation,
+            bookId: lq.bookId.toString(),
+            chapterId: lq.chapterId.toString(),
+            topicId: lq.topicId.toString(),
+            book: lq.book,
+            topic: lq.topic,
+            type: lq.type,
+            isLocal: true
+          } as any));
+
+          data = [...cloudData, ...localQuestions];
+          data = data.sort(() => Math.random() - 0.5).slice(0, 25);
         }
 
         setQuestions(data);

@@ -9,44 +9,94 @@ import { motion } from 'motion/react';
 import { Book as BookIcon, ChevronRight, Search, Filter } from 'lucide-react';
 import { cn } from '../lib/utils';
 
+import { localDb } from '../lib/localDb';
+import { useLiveQuery } from 'dexie-react-hooks';
+
 export default function StudyMode() {
   const { profile } = useAuth();
   const [books, setBooks] = useState<Book[]>([]);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [topics, setTopics] = useState<Topic[]>([]);
-  const [selectedBook, setSelectedBook] = useState<string | null>(null);
-  const [selectedChapter, setSelectedChapter] = useState<string | null>(null);
+  const [selectedBook, setSelectedBook] = useState<string | number | null>(null);
+  const [selectedChapter, setSelectedChapter] = useState<string | number | null>(null);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'book' | 'subject'>('book');
   const [allTopics, setAllTopics] = useState<Topic[]>([]);
   const [questionCounts, setQuestionCounts] = useState<{ [key: string]: number }>({});
 
+  // Fetch local data using Dexie hooks
+  const dexieBooks = useLiveQuery(() => localDb.books.toArray());
+  const dexieTopics = useLiveQuery(() => localDb.topics.toArray());
+
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Fetch Books
-        let booksQuery;
-        if (profile?.targetExam) {
-          booksQuery = query(collection(db, 'books'), where('examType', '==', profile.targetExam));
-        } else {
-          booksQuery = query(collection(db, 'books'));
+        // Fetch Cloud Books
+        let cloudBooks: Book[] = [];
+        try {
+          let booksQuery;
+          if (profile?.targetExam) {
+            booksQuery = query(collection(db, 'books'), where('examType', '==', profile.targetExam));
+          } else {
+            booksQuery = query(collection(db, 'books'));
+          }
+          const booksSnap = await getDocs(booksQuery);
+          cloudBooks = booksSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Book));
+        } catch (e) {
+          console.warn('Cloud fetch failed, relying on local data');
         }
-        const booksSnap = await getDocs(booksQuery);
-        setBooks(booksSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) }) as Book));
+
+        // Combine with Local Books (avoiding duplicates if synced)
+        const localBooksData = dexieBooks || [];
+        const combinedBooks = [...cloudBooks];
+        
+        localBooksData.forEach(lb => {
+          if (!lb.cloudId || !cloudBooks.find(cb => cb.id === lb.cloudId)) {
+            combinedBooks.push({
+              id: lb.id!.toString(),
+              title: lb.title,
+              description: lb.description,
+              examType: lb.examType,
+              image: lb.image,
+              questionCount: lb.questionCount,
+              isLocal: true
+            } as any);
+          }
+        });
+
+        setBooks(combinedBooks);
 
         // Fetch All Topics for "By Subject" view
-        const topicsSnap = await getDocs(collection(db, 'topics'));
-        setAllTopics(topicsSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) }) as Topic));
+        let cloudTopics: Topic[] = [];
+        try {
+          const topicsSnap = await getDocs(collection(db, 'topics'));
+          cloudTopics = topicsSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Topic));
+        } catch (e) {}
 
-        // Fetch all questions to aggregate counts
-        const questionsSnap = await getDocs(collection(db, 'questions'));
+        const localTopicsData = dexieTopics || [];
+        const combinedTopics = [...cloudTopics];
+        localTopicsData.forEach(lt => {
+          if (!lt.cloudId || !cloudTopics.find(ct => ct.id === lt.cloudId)) {
+            combinedTopics.push({
+              id: lt.id!.toString(),
+              title: lt.title,
+              chapterId: lt.chapterId.toString(),
+              notes: lt.notes,
+              questionCount: lt.questionCount,
+              isLocal: true
+            } as any);
+          }
+        });
+        setAllTopics(combinedTopics);
+
+        // Update counts
         const counts: { [key: string]: number } = {};
-        questionsSnap.docs.forEach(doc => {
-          const data = doc.data();
-          if (data.bookId) counts[data.bookId] = (counts[data.bookId] || 0) + 1;
-          if (data.chapterId) counts[data.chapterId] = (counts[data.chapterId] || 0) + 1;
-          if (data.topicId) counts[data.topicId] = (counts[data.topicId] || 0) + 1;
+        combinedBooks.forEach(b => { 
+          if (b.questionCount !== undefined) counts[b.id] = b.questionCount; 
+        });
+        combinedTopics.forEach(t => { 
+          if (t.questionCount !== undefined) counts[t.id] = t.questionCount; 
         });
         setQuestionCounts(counts);
       } catch (err) {
@@ -56,29 +106,84 @@ export default function StudyMode() {
       }
     };
     fetchData();
-  }, [profile]);
+  }, [profile, dexieBooks, dexieTopics]);
 
-  const handleBookSelect = async (bookId: string) => {
+  const handleBookSelect = async (bookId: string | number) => {
     setSelectedBook(bookId);
     setSelectedChapter(null);
     setChapters([]);
     setTopics([]);
     try {
-      const chaptersQuery = query(collection(db, 'chapters'), where('bookId', '==', bookId));
-      const chaptersSnap = await getDocs(chaptersQuery);
-      setChapters(chaptersSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) }) as Chapter));
+      let combinedChapters: Chapter[] = [];
+      
+      // Check if it's a local book (numeric ID or marked as local)
+      const book = books.find(b => b.id === bookId);
+      const isLocal = (book as any)?.isLocal || typeof bookId === 'number';
+
+      if (isLocal) {
+        const localChapters = await localDb.chapters.where('bookId').equals(Number(bookId)).toArray();
+        combinedChapters = localChapters.map(lc => ({
+          id: lc.id!.toString(),
+          title: lc.title,
+          bookId: lc.bookId.toString(),
+          questionCount: lc.questionCount,
+          isLocal: true
+        } as any));
+      } else {
+        const chaptersQuery = query(collection(db, 'chapters'), where('bookId', '==', bookId));
+        const chaptersSnap = await getDocs(chaptersQuery);
+        combinedChapters = chaptersSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Chapter));
+      }
+
+      setChapters(combinedChapters);
+      
+      // Update counts for chapters
+      setQuestionCounts(prev => {
+        const next = { ...prev };
+        combinedChapters.forEach(c => { 
+          if (c.questionCount !== undefined) next[c.id] = c.questionCount; 
+        });
+        return next;
+      });
     } catch (err) {
       handleFirestoreError(err, OperationType.GET, `chapters-${bookId}`);
     }
   };
 
-  const handleChapterSelect = async (chapterId: string) => {
+  const handleChapterSelect = async (chapterId: string | number) => {
     setSelectedChapter(chapterId);
     setTopics([]);
     try {
-      const topicsQuery = query(collection(db, 'topics'), where('chapterId', '==', chapterId));
-      const topicsSnap = await getDocs(topicsQuery);
-      setTopics(topicsSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) }) as Topic));
+      let combinedTopics: Topic[] = [];
+      const chapter = chapters.find(c => c.id === chapterId);
+      const isLocal = (chapter as any)?.isLocal || typeof chapterId === 'number';
+
+      if (isLocal) {
+        const localTopics = await localDb.topics.where('chapterId').equals(Number(chapterId)).toArray();
+        combinedTopics = localTopics.map(lt => ({
+          id: lt.id!.toString(),
+          title: lt.title,
+          chapterId: lt.chapterId.toString(),
+          notes: lt.notes,
+          questionCount: lt.questionCount,
+          isLocal: true
+        } as any));
+      } else {
+        const topicsQuery = query(collection(db, 'topics'), where('chapterId', '==', chapterId));
+        const topicsSnap = await getDocs(topicsQuery);
+        combinedTopics = topicsSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Topic));
+      }
+
+      setTopics(combinedTopics);
+
+      // Update counts for topics
+      setQuestionCounts(prev => {
+        const next = { ...prev };
+        combinedTopics.forEach(t => { 
+          if (t.questionCount !== undefined) next[t.id] = t.questionCount; 
+        });
+        return next;
+      });
     } catch (err) {
       handleFirestoreError(err, OperationType.GET, `topics-${chapterId}`);
     }

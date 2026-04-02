@@ -27,21 +27,25 @@ export async function extractMCQsFromText(text: string, retryCount = 0): Promise
           role: "user",
           parts: [
             {
-              text: `Extract EVERY SINGLE Multiple Choice Question (MCQ) from the provided text. 
+              text: `EXTRACT EVERY SINGLE Multiple Choice Question (MCQ) from the provided text. 
               
-              The text may contain MCQs in various formats:
-              - Numbered questions (1., 2., 3...) or unnumbered.
-              - Options labeled with letters (A, B, C, D), numbers (1, 2, 3, 4), or bullet points.
-              - The correct answer might be indicated by a bold letter, a "Correct Answer:" label, or an answer key at the end.
-              - Sometimes the explanation follows the question immediately.
+              This is for a high-stakes medical exam preparation app. MISSING EVEN ONE QUESTION IS UNACCEPTABLE.
+              
+              The text may contain:
+              - Standard MCQs (Question + Options A-E).
+              - Clinical Case Studies followed by one or more questions.
+              - Questions with images referenced (just extract the text).
+              - Questions where the answer is in a separate "Answer Key" section.
+              - Questions with detailed "Explanations" or "Rationales".
               
               YOUR TASK:
               1. Identify every question-like structure.
-              2. Extract the question text, all available options, and the correct answer.
-              3. If the correct answer is not explicitly stated, use your medical knowledge to determine the most likely correct answer from the options.
-              4. Provide a detailed medical explanation for why that answer is correct.
-              5. Categorize the question into a specific medical sub-topic (e.g., Cardiology, Neurology, Pediatrics).
-              6. Identify the source book if mentioned, otherwise use "General Medical Reference".
+              2. For Case Studies: Ensure the clinical stem (the story) is included in the 'text' of the question. If one stem applies to multiple questions, repeat the stem for each question.
+              3. Extract the full question text, all available options, and the correct answer.
+              4. If the correct answer is not explicitly stated in the text, use your medical expertise to determine the most likely correct answer from the options.
+              5. Provide a detailed medical explanation for why that answer is correct, even if you have to write it yourself.
+              6. Categorize the question into a specific medical sub-topic (e.g., Cardiology, Neurology, Pediatrics, Anatomy, Biochemistry, Pathology, Pharmacology, Microbiology, Psychiatry, Obstetrics & Gynecology).
+              7. Identify the source book if mentioned, otherwise use "General Medical Reference".
               
               Text to process:
               ${text}
@@ -55,11 +59,13 @@ export async function extractMCQsFromText(text: string, retryCount = 0): Promise
         Your goal is to perform a high-recall extraction of all MCQs from the provided text. 
         
         CRITICAL RULES:
-        - DO NOT SKIP ANY QUESTIONS. Even if the formatting is messy, try your best to reconstruct the question and options.
-        - If a question is partially cut off but recognizable, extract what you can.
+        - DO NOT SKIP ANY QUESTIONS. 
+        - DO NOT SUMMARIZE. 
+        - DO NOT STOP UNTIL EVERY QUESTION IN THE TEXT IS EXTRACTED.
+        - RECONSTRUCT jumbled text: If the PDF extraction jumbled the options or question text, use your medical knowledge to fix the grammar and structure.
+        - CASE STUDIES: If a clinical vignette is followed by multiple questions, prepend the vignette to each question's text so each MCQ is self-contained.
         - Always return a valid JSON array of objects.
         - Each object must have: text, options (array), correctAnswer (string), explanation (string), topic (string), book (string).
-        - If no explanation is in the text, write a professional one yourself.
         - Ensure the 'correctAnswer' matches one of the strings in the 'options' array exactly.
         - If you find 0 questions, return an empty array [].`,
         responseMimeType: "application/json",

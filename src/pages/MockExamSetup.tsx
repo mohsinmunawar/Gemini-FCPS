@@ -8,6 +8,8 @@ import { motion } from 'motion/react';
 import { Settings, Book, Clock, List, ChevronRight, ChevronLeft, CheckCircle2 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
+import { localDb } from '../lib/localDb';
+
 export default function MockExamSetup() {
   const navigate = useNavigate();
   const [topics, setTopics] = useState<Topic[]>([]);
@@ -16,17 +18,44 @@ export default function MockExamSetup() {
   const [numQuestions, setNumQuestions] = useState(25);
   const [timeLimit, setTimeLimit] = useState(30);
 
-  useEffect(() => {
-    const fetchTopics = async () => {
+  const fetchTopics = async () => {
+    setLoading(true);
+    try {
+      // Fetch Cloud Topics
+      let cloudTopics: Topic[] = [];
       try {
         const snap = await getDocs(collection(db, 'topics'));
-        setTopics(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Topic)));
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, 'mock-exam-topics');
-      } finally {
-        setLoading(false);
-      }
-    };
+        cloudTopics = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Topic));
+      } catch (e) {}
+
+      // Fetch Local Topics
+      const localTopicsData = await localDb.topics.toArray();
+      const localTopics = localTopicsData.map(lt => ({
+        id: lt.id!.toString(),
+        title: lt.title,
+        chapterId: lt.chapterId.toString(),
+        notes: lt.notes,
+        questionCount: lt.questionCount,
+        isLocal: true
+      } as any));
+
+      // Combine and de-duplicate
+      const combined = [...cloudTopics];
+      localTopics.forEach(lt => {
+        if (!lt.cloudId || !cloudTopics.find(ct => ct.id === lt.cloudId)) {
+          combined.push(lt);
+        }
+      });
+
+      setTopics(combined);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.GET, 'mock-exam-topics');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
     fetchTopics();
   }, []);
 

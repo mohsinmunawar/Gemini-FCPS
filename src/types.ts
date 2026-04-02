@@ -29,12 +29,16 @@ export interface Book {
   id: string;
   title: string;
   examType: ExamType;
+  description?: string;
+  image?: string;
+  questionCount?: number;
 }
 
 export interface Chapter {
   id: string;
   title: string;
   bookId: string;
+  questionCount?: number;
 }
 
 export interface Topic {
@@ -42,6 +46,7 @@ export interface Topic {
   title: string;
   chapterId: string;
   notes?: string;
+  questionCount?: number;
 }
 
 export interface UserProgress {
